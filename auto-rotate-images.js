@@ -32,7 +32,7 @@ async function fixPdfOrientation(inputPath, outputPath) {
     console.log(`Page ${i + 1} text length: ${text.length}`);
 
     // Heuristic: if page text length < 10, assume upside down and rotate 180°
-    if (text.length < 10) {
+    if (text.length < 1) {
       console.log(`Page ${i + 1} seems empty or unreadable, rotating 180°`);
       const page = pdfDoc.getPages()[i];
       const currentRotation = page.getRotation().angle;
@@ -49,6 +49,6 @@ async function fixPdfOrientation(inputPath, outputPath) {
 
 // Example usage - replace filenames with your actual PDF paths
 fixPdfOrientation(
-  path.join(__dirname, 'OPCR Accomplishments 2024_Mayors signature.pdf'),
-  path.join(__dirname, 'output_rotated.pdf')
+  path.join(__dirname, 'Adviento, Jerome A._Diploma.pdf'),
+  path.join(__dirname, 'output_.pdf')
 ).catch(console.error);
