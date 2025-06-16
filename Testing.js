@@ -1,139 +1,200 @@
 const fs = require('fs');
 const path = require('path');
-const { PDFDocument, degrees } = require('pdf-lib');
+const { PDFDocument, degrees, rgb } = require('pdf-lib');
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+const { createWorker } = require('tesseract.js');
+const readline = require('readline');
 
 // Configuration
 const ORIENTATION_MARKERS = [
-    "REPUBLIC OF THE PHILIPPINES",
+    "republic of the philippines",
     "professional regulation commission",
     "board of environmental planning",
     "republic act no",
     "certificate of registration",
     "this is to certify that"
 ];
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 1000; // 1 second
+const MIN_TEXT_LENGTH = 20;
+const CONFIDENCE_THRESHOLD = 70;
 
-async function extractPageText(pdf, pageIndex) {
-    try {
-        const page = await pdf.getPage(pageIndex + 1);
-        const textContent = await page.getTextContent();
-        return textContent.items.map(item => item.str).join(' ').toLowerCase().trim();
-    } catch (error) {
-        console.error(`Error extracting text from page ${pageIndex + 1}:`, error);
-        return '';
-    }
+// Create interface for user input
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
+
+async function extractTextWithOCR(pageImage) {
+    const worker = await createWorker();
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
+    const { data: { text, confidence } } = await worker.recognize(pageImage);
+    await worker.terminate();
+    return { text: text.toLowerCase().trim(), confidence };
 }
 
-async function determinePageRotation(text) {
-    if (!text || text.length < 10) {
-        console.log('Insufficient text for analysis - trying OCR fallback or manual inspection');
-        return degrees(0); // Default to no rotation
+async function analyzePageOrientation(page, pageIndex) {
+    console.log(`\nAnalyzing page ${pageIndex + 1}...`);
+
+    // Try standard text extraction first
+    const textContent = await page.getTextContent();
+    const pdfText = textContent.items.map(item => item.str).join(' ').toLowerCase().trim();
+
+    if (pdfText.length >= MIN_TEXT_LENGTH) {
+        console.log(`Extracted ${pdfText.length} characters from PDF text layer`);
+        const rotation = determineRotationFromText(pdfText);
+        if (rotation !== null) return rotation;
     }
 
-    const markerCount = ORIENTATION_MARKERS.filter(marker => 
+    // Fallback to OCR if needed
+    console.log('Attempting OCR analysis...');
+    const { text: ocrText, confidence } = await extractTextWithOCR(await extractPageAsImage(page));
+    
+    if (confidence > CONFIDENCE_THRESHOLD && ocrText.length >= MIN_TEXT_LENGTH) {
+        console.log(`OCR extracted ${ocrText.length} characters with ${confidence}% confidence`);
+        const rotation = determineRotationFromText(ocrText);
+        if (rotation !== null) return rotation;
+    }
+
+    // Final fallback to layout analysis
+    console.log('Using layout analysis...');
+    return determineRotationFromLayout(page);
+}
+
+function determineRotationFromText(text) {
+    // Check for orientation markers in normal orientation
+    const normalMatches = ORIENTATION_MARKERS.filter(marker => 
         text.includes(marker)
     ).length;
 
-    if (markerCount >= 2) return degrees(0);
+    if (normalMatches >= 2) {
+        console.log(`Found ${normalMatches} orientation markers - page is correctly oriented`);
+        return 0;
+    }
 
-    // Simple rotation detection (for 180° only in this basic version)
+    // Check for upside-down text (180° rotation)
     const reversedText = text.split('').reverse().join('');
-    const reversedMarkers = ORIENTATION_MARKERS.filter(marker => 
+    const reversedMatches = ORIENTATION_MARKERS.filter(marker => 
         reversedText.includes(marker)
     ).length;
 
-    return reversedMarkers > markerCount ? degrees(180) : degrees(0);
+    if (reversedMatches > normalMatches) {
+        console.log(`Found ${reversedMatches} markers in reversed text - page is upside down`);
+        return 180;
+    }
+
+    // Couldn't determine from text
+    return null;
 }
 
-async function safeWriteFile(filePath, data, retries = MAX_RETRIES) {
-    try {
-        fs.writeFileSync(filePath, data);
-        return true;
-    } catch (error) {
-        if (error.code === 'EBUSY' && retries > 0) {
-            console.log(`File busy, retrying in ${RETRY_DELAY}ms... (${retries} attempts remaining)`);
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            return safeWriteFile(filePath, data, retries - 1);
-        }
-        throw error;
+async function determineRotationFromLayout(page) {
+    // Simple layout analysis - check if text is mostly in top half (normal)
+    // or bottom half (possibly upside down)
+    const textContent = await page.getTextContent();
+    const verticalPositions = textContent.items.map(item => 
+        item.transform[5] / page.getHeight()
+    );
+
+    const avgPosition = verticalPositions.reduce((sum, pos) => sum + pos, 0) / verticalPositions.length;
+    
+    if (avgPosition < 0.5) {
+        console.log('Text appears in top half - assuming correct orientation');
+        return 0;
+    } else {
+        console.log('Text appears in bottom half - trying 180° rotation');
+        return 180;
     }
 }
 
-async function fixPdfOrientation(inputPath, outputPath) {
-    let pdfData;
+async function autoRotatePdf(inputPath, outputPath) {
     try {
-        console.log(`Processing file: ${inputPath}`);
-        pdfData = fs.readFileSync(inputPath);
+        console.log(`\nProcessing file: ${inputPath}`);
+        const pdfBytes = fs.readFileSync(inputPath);
 
-        // Load documents
-        const pdfDoc = await PDFDocument.load(pdfData);
-        const loadingTask = pdfjsLib.getDocument({ data: pdfData });
+        // Load the PDF document
+        const pdfDoc = await PDFDocument.load(pdfBytes);
+        const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
         const pdf = await loadingTask.promise;
 
         const pageCount = pdf.numPages;
-        console.log(`Document has ${pageCount} pages`);
+        console.log(`Document has ${pageCount} page(s)`);
 
         // Process each page
         for (let i = 0; i < pageCount; i++) {
-            console.log(`Processing page ${i + 1}/${pageCount}`);
-            
-            const originalText = await extractPageText(pdf, i);
-            console.log(`Extracted ${originalText.length} chars: ${originalText.substring(0, 50)}...`);
-            
-            const correctRotation = await determinePageRotation(originalText);
             const page = pdfDoc.getPages()[i];
+            const pdfjsPage = await pdf.getPage(i + 1);
+
+            // Get current rotation
             const currentRotation = page.getRotation().angle;
 
-            if (currentRotation !== correctRotation.angle) {
-                console.log(`Rotating from ${currentRotation}° to ${correctRotation.angle}°`);
-                page.setRotation(correctRotation);
+            // Analyze page to determine correct rotation
+            let newRotation = await analyzePageOrientation(pdfjsPage, i);
+
+            // If automatic detection failed, prompt user
+            if (newRotation === null) {
+                newRotation = await new Promise(resolve => {
+                    rl.question(`Could not determine orientation for page ${i + 1}. Enter rotation (0/90/180/270): `, answer => {
+                        resolve(parseInt(answer) || 0);
+                    });
+                });
+            }
+
+            // Apply rotation if needed
+            if (newRotation !== currentRotation) {
+                console.log(`Rotating page ${i + 1} to ${newRotation}°`);
+                page.setRotation(degrees(newRotation));
+            } else {
+                console.log(`Page ${i + 1} orientation is correct`);
             }
         }
 
-        // Save with retry logic
+        // Save the rotated PDF
         const rotatedPdfBytes = await pdfDoc.save();
-        await safeWriteFile(outputPath, rotatedPdfBytes);
-        console.log(`Successfully saved to: ${outputPath}`);
+        fs.writeFileSync(outputPath, rotatedPdfBytes);
+        console.log(`\nSuccessfully saved rotated PDF to: ${outputPath}`);
 
     } catch (error) {
-        console.error('Processing failed:', error);
-        
-        // Provide helpful troubleshooting tips
-        if (error.code === 'EBUSY') {
-            console.log('\nTroubleshooting tips:');
-            console.log('1. Close the output file if open in another program');
-            console.log('2. Try a different output filename');
-            console.log('3. Check file permissions in the output directory');
-        } else if (error.message.includes('password')) {
-            console.log('Document may be password protected');
-        } else if (!pdfData) {
-            console.log('Input file may not exist or be inaccessible');
-        }
-        
+        console.error('Error processing PDF:', error);
         throw error;
     }
 }
 
-// Example usage with additional checks
+// Helper function to extract page as image (simplified)
+async function extractPageAsImage(page) {
+    // In a real implementation, you would render the page to an image buffer
+    // This is a placeholder for the concept
+    return {
+        width: page.view[2],
+        height: page.view[3],
+        data: Buffer.alloc(0) // Actual implementation would contain image data
+    };
+}
+
+// Main function
 async function main() {
-    const inputPdf = path.join(__dirname, 'Adviento, Jerome A._Diploma.pdf');
-    const outputPdf = path.join(__dirname, 'oriented_output.pdf');
-
-    // Check if input exists
-    if (!fs.existsSync(inputPdf)) {
-        console.error(`Input file not found: ${inputPdf}`);
-        return;
-    }
-
     try {
-        await fixPdfOrientation(inputPdf, outputPdf);
-        console.log('Orientation correction completed successfully');
+        console.log('=== Automatic PDF Orientation Tool ===');
+        
+        const inputPath = await new Promise(resolve => {
+            rl.question('Enter input PDF file path: ', resolve);
+        });
+
+        if (!fs.existsSync(inputPath)) {
+            console.error('Error: Input file does not exist');
+            return;
+        }
+
+        const outputPath = await new Promise(resolve => {
+            rl.question('Enter output PDF file path: ', resolve);
+        });
+
+        await autoRotatePdf(inputPath, outputPath);
+        
     } catch (error) {
-        console.error('Process failed after retries');
-        process.exit(1);
+        console.error('Process failed:', error);
+    } finally {
+        rl.close();
     }
 }
 
+// Start the program
 main();
