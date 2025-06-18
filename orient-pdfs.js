@@ -1,73 +1,63 @@
 const fs = require('fs');
-const { PDFDocument, degrees } = require('pdf-lib');
+const { PDFDocument } = require('pdf-lib');
 const path = require('path');
 
-// ========== CONFIGURATION ========== //
-const INPUT_FOLDER = path.join('C:', 'Users', 'Kenneth', 'Desktop', 'ORIENTFILES');
-const OUTPUT_FOLDER = path.join(INPUT_FOLDER, 'ORIENTED_FILES');
+// Function to split a single PDF
+async function splitPDF(inputPath, outputFolder) {
+    try {
+        const pdfBytes = fs.readFileSync(inputPath);
+        const pdfDoc = await PDFDocument.load(pdfBytes);
 
-// ========== MAIN FUNCTION ========== //
-async function correctPdfOrientation() {
-  try {
-    // Create output folder if it doesn't exist
-    if (!fs.existsSync(OUTPUT_FOLDER)) {
-      fs.mkdirSync(OUTPUT_FOLDER, { recursive: true });
-    }
+        const fileName = path.basename(inputPath, path.extname(inputPath));
 
-    // Get all PDF files in input folder
-    const files = fs.readdirSync(INPUT_FOLDER).filter(file => file.toLowerCase().endsWith('.pdf'));
+        console.log(`📄 Splitting: ${fileName} (${pdfDoc.getPageCount()} pages)`);
 
-    if (files.length === 0) {
-      console.log('No PDF files found in input folder');
-      return;
-    }
+        for (let i = 0; i < pdfDoc.getPageCount(); i++) {
+            const newPdf = await PDFDocument.create();
+            const [page] = await newPdf.copyPages(pdfDoc, [i]);
+            newPdf.addPage(page);
 
-    for (const file of files) {
-      const inputPath = path.join(INPUT_FOLDER, file);
-      const outputPath = path.join(OUTPUT_FOLDER, file);
+            const outputPath = path.join(outputFolder, `${fileName}_Page_${i + 1}.pdf`);
+            const newPdfBytes = await newPdf.save();
+            fs.writeFileSync(outputPath, newPdfBytes);
 
-      console.log(`\nProcessing: ${file}`);
-
-      // Load the PDF document
-      const pdfBytes = fs.readFileSync(inputPath);
-      const pdfDoc = await PDFDocument.load(pdfBytes);
-      
-      let rotationApplied = false;
-      const pages = pdfDoc.getPages();
-
-      // Check each page's orientation
-      for (let i = 0; i < pages.length; i++) {
-        const page = pages[i];
-        const { width, height } = page.getSize();
-        
-        // Detect portrait/landscape (assuming standard sizes)
-        const isPortrait = height > width;
-        
-        // Check if page needs rotation (you can adjust these thresholds)
-        if (!isPortrait && width > height) {
-          console.log(`- Rotating page ${i + 1} (${width}x${height})`);
-          page.setRotation(degrees(270));
-          rotationApplied = true;
+            console.log(`✅ Saved: ${path.basename(outputPath)}`);
         }
-      }
 
-      if (rotationApplied) {
-        // Save the modified PDF
-        const correctedPdfBytes = await pdfDoc.save();
-        fs.writeFileSync(outputPath, correctedPdfBytes);
-        console.log(`✅ Saved corrected file: ${file}`);
-      } else {
-        console.log('✔ All pages already properly oriented');
-        // Copy original if no changes needed
-        fs.copyFileSync(inputPath, outputPath);
-      }
+        console.log(`🎉 Finished splitting: ${fileName}`);
+    } catch (error) {
+        console.error(`❌ Error splitting PDF: ${error.message}`);
     }
-
-    console.log('\n🎉 All files processed!');
-  } catch (error) {
-    console.error('\n❌ Error:', error.message);
-  }
 }
 
-// Run the tool
-correctPdfOrientation();
+// Function to process all PDFs in the folder
+async function processAllPDFs(folderPath, outputFolder) {
+    try {
+        if (!fs.existsSync(outputFolder)) fs.mkdirSync(outputFolder, { recursive: true });
+
+        const files = fs.readdirSync(folderPath);
+        const pdfFiles = files.filter(file => path.extname(file).toLowerCase() === '.pdf');
+
+        if (pdfFiles.length === 0) {
+            console.log('⚠️ No PDF files found!');
+            return;
+        }
+
+        for (const file of pdfFiles) {
+            const inputPath = path.join(folderPath, file);
+            console.log(`🔍 Processing: ${file}`);
+            await splitPDF(inputPath, outputFolder);
+        }
+
+        console.log('✨ All PDFs split successfully!');
+    } catch (error) {
+        console.error(`❌ Error processing PDFs: ${error.message}`);
+    }
+}
+
+// Set your input folder and output folder paths
+const folderPath = path.join('C:', 'Users', 'Kenneth', 'Desktop', 'ORIENTFILES', 'Del Valle, Ranhill M._PDS.pdf');
+const outputFolder = path.join(folderPath, 'output');
+
+// Start the process
+processAllPDFs(folderPath, outputFolder).catch(console.error);
